@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数码宝贝进化 - 亚古兽 → 战斗暴龙兽</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="container">
+        <div id="ui">
+            <h1>数码宝贝进化</h1>
+            <div id="info">
+                <p id="status">准备就绪</p>
+            </div>
+            <button id="evolveBtn" class="evolve-button">开始进化</button>
+            <button id="resetBtn" class="reset-button" style="display: none;">重置</button>
+        </div>
+        <canvas id="canvas"></canvas>
+    </div>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="main.js"></script>
+</body>
+</html>
+
