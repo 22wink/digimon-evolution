@@ -9,8 +9,10 @@ class DigimonEvolution {
     this.scene = null;
     this.camera = null;
     this.renderer = null;
-    this.agumonModel = null;
-    this.wargreymonModel = null;
+    this.agumonModel = null; // 亚古兽
+    this.greymonModel = null; // 暴龙兽
+    this.metalGreymonModel = null; // 机械暴龙兽
+    this.wargreymonModel = null; // 战斗暴龙兽
     this.currentModel = null;
     this.isEvolving = false;
     this.particles = null;
@@ -18,9 +20,13 @@ class DigimonEvolution {
     this.lights = [];
     this.composer = null;
     this.evolutionStage = 0; // 进化阶段：0-准备, 1-数据流, 2-能量爆发, 3-形态转换, 4-新形态显现
+    this.evolutionLevel = 0; // 当前进化等级：0-亚古兽, 1-暴龙兽, 2-机械暴龙兽, 3-战斗暴龙兽
+    this.modelCache = null; // IndexedDB缓存
 
     this.init();
-    this.loadModels();
+    this.initCache().then(() => {
+      this.loadModels();
+    });
     this.setupEventListeners();
   }
 
@@ -156,23 +162,31 @@ class DigimonEvolution {
   }
 
   createDataStreams() {
-    // 创建螺旋上升的数据流粒子
-    const streamCount = 2000;
+    // 创建龙卷风效果的数据流粒子（从底部螺旋上升）
+    const streamCount = 3000; // 增加粒子数量以增强效果
     const geometry = new THREE.BufferGeometry();
     const positions = new Float32Array(streamCount * 3);
     const colors = new Float32Array(streamCount * 3);
     const speeds = new Float32Array(streamCount);
     const radii = new Float32Array(streamCount);
     const angles = new Float32Array(streamCount);
+    const heights = new Float32Array(streamCount); // 初始高度
+    const verticalSpeeds = new Float32Array(streamCount); // 垂直上升速度
+    const rotationSpeeds = new Float32Array(streamCount); // 旋转速度
 
     const color1 = new THREE.Color(0x00ffff); // 青色数据流
     const color2 = new THREE.Color(0xff00ff); // 品红色数据流
 
     for (let i = 0; i < streamCount; i++) {
       const i3 = i * 3;
-      const radius = 0.5 + Math.random() * 3;
+      // 龙卷风形状：底部半径大，顶部半径小
+      const heightRatio = Math.random(); // 0-1，表示在龙卷风中的高度比例
+      const baseRadius = 4; // 底部最大半径
+      const topRadius = 0.5; // 顶部最小半径
+      const radius = baseRadius - (baseRadius - topRadius) * heightRatio;
+
       const angle = Math.random() * Math.PI * 2;
-      const height = Math.random() * 8;
+      const height = -2 + heightRatio * 10; // 从底部(-2)到顶部(8)
 
       positions[i3] = Math.cos(angle) * radius;
       positions[i3 + 1] = height;
@@ -187,9 +201,15 @@ class DigimonEvolution {
       colors[i3 + 1] = mixedColor.g;
       colors[i3 + 2] = mixedColor.b;
 
-      speeds[i] = 0.02 + Math.random() * 0.03;
+      // 旋转速度：底部快，顶部更快（形成螺旋）
+      rotationSpeeds[i] = 0.05 + Math.random() * 0.1 + heightRatio * 0.1;
+      // 垂直上升速度
+      verticalSpeeds[i] = 0.03 + Math.random() * 0.05;
+      // 半径变化速度（向中心收缩）
+      speeds[i] = 0.01 + Math.random() * 0.02;
       radii[i] = radius;
       angles[i] = angle;
+      heights[i] = height;
     }
 
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -197,9 +217,12 @@ class DigimonEvolution {
     geometry.userData.speeds = speeds;
     geometry.userData.radii = radii;
     geometry.userData.angles = angles;
+    geometry.userData.heights = heights;
+    geometry.userData.verticalSpeeds = verticalSpeeds;
+    geometry.userData.rotationSpeeds = rotationSpeeds;
 
     const material = new THREE.PointsMaterial({
-      size: 0.15,
+      size: 0.2,
       vertexColors: true,
       transparent: true,
       opacity: 0,
@@ -211,75 +234,365 @@ class DigimonEvolution {
     this.scene.add(this.dataStreams);
   }
 
+  // 初始化IndexedDB缓存
+  async initCache() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open("DigimonModelsCache", 1);
+
+      request.onerror = () => {
+        console.warn("IndexedDB不可用，将使用网络加载");
+        resolve();
+      };
+
+      request.onsuccess = () => {
+        this.modelCache = request.result;
+        resolve();
+      };
+
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains("models")) {
+          db.createObjectStore("models", { keyPath: "url" });
+        }
+      };
+    });
+  }
+
+  // 从缓存加载模型
+  async loadFromCache(url) {
+    if (!this.modelCache) return null;
+
+    return new Promise((resolve) => {
+      const transaction = this.modelCache.transaction(["models"], "readonly");
+      const store = transaction.objectStore("models");
+      const request = store.get(url);
+
+      request.onsuccess = () => {
+        if (request.result && request.result.data) {
+          // 检查缓存是否过期（7天）
+          const cacheAge = Date.now() - request.result.timestamp;
+          const maxAge = 7 * 24 * 60 * 60 * 1000; // 7天
+
+          if (cacheAge < maxAge) {
+            resolve(request.result.data);
+          } else {
+            resolve(null);
+          }
+        } else {
+          resolve(null);
+        }
+      };
+
+      request.onerror = () => resolve(null);
+    });
+  }
+
+  // 保存模型到缓存
+  async saveToCache(url, arrayBuffer) {
+    if (!this.modelCache) return;
+
+    try {
+      const transaction = this.modelCache.transaction(["models"], "readwrite");
+      const store = transaction.objectStore("models");
+      await store.put({
+        url: url,
+        data: arrayBuffer,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.warn("保存缓存失败:", error);
+    }
+  }
+
+  // 优化的模型加载函数（支持缓存和并行加载）
+  async loadModelWithCache(
+    url,
+    name,
+    loader,
+    priority = false,
+    onProgress = null
+  ) {
+    // 尝试从缓存加载
+    const cachedData = await this.loadFromCache(url);
+
+    if (cachedData) {
+      // 从缓存加载（快速，无需进度）
+      if (onProgress) onProgress({ loaded: 100, total: 100, fromCache: true });
+
+      const blob = new Blob([cachedData]);
+      const blobUrl = URL.createObjectURL(blob);
+
+      return new Promise((resolve, reject) => {
+        loader.load(
+          blobUrl,
+          (gltf) => {
+            URL.revokeObjectURL(blobUrl);
+            resolve(gltf);
+          },
+          undefined,
+          (error) => {
+            URL.revokeObjectURL(blobUrl);
+            reject(error);
+          }
+        );
+      });
+    }
+
+    // 从网络加载（带进度跟踪）
+    return new Promise((resolve, reject) => {
+      // 使用fetch获取，支持进度跟踪
+      fetch(url)
+        .then((response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+          const contentLength = response.headers.get("content-length");
+          const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+          if (!response.body) {
+            return response.arrayBuffer().then((buffer) => ({ buffer, total }));
+          }
+
+          const reader = response.body.getReader();
+          const chunks = [];
+          let loaded = 0;
+
+          const pump = () => {
+            return reader.read().then(({ done, value }) => {
+              if (done) {
+                const buffer = new Uint8Array(loaded);
+                let offset = 0;
+                for (const chunk of chunks) {
+                  buffer.set(chunk, offset);
+                  offset += chunk.length;
+                }
+                return { buffer: buffer.buffer, total };
+              }
+
+              chunks.push(value);
+              loaded += value.length;
+
+              if (onProgress && total > 0) {
+                onProgress({ loaded, total, fromCache: false });
+              }
+
+              return pump();
+            });
+          };
+
+          return pump();
+        })
+        .then(({ buffer, total }) => {
+          const arrayBuffer =
+            buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
+
+          // 保存到缓存
+          this.saveToCache(url, arrayBuffer);
+
+          // 创建Blob URL并加载
+          const blob = new Blob([arrayBuffer]);
+          const blobUrl = URL.createObjectURL(blob);
+
+          loader.load(
+            blobUrl,
+            (gltf) => {
+              URL.revokeObjectURL(blobUrl);
+              resolve(gltf);
+            },
+            (progress) => {
+              // GLTFLoader的进度回调
+              if (onProgress && progress.total > 0) {
+                onProgress({
+                  loaded: progress.loaded,
+                  total: progress.total,
+                  fromCache: false,
+                  stage: "parsing",
+                });
+              }
+            },
+            (error) => {
+              URL.revokeObjectURL(blobUrl);
+              reject(error);
+            }
+          );
+        })
+        .catch(reject);
+    });
+  }
+
+  // 设置模型属性
+  setupModel(model, visible = true) {
+    model.scale.set(1, 1, 1);
+    model.position.set(0, 0, 0);
+    model.visible = visible;
+    model.traverse((child) => {
+      if (child.isMesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+    return model;
+  }
+
   async loadModels() {
     const loader = new GLTFLoader();
     const statusEl = document.getElementById("status");
 
     try {
-      statusEl.textContent = "正在加载亚古兽...";
+      // 模型配置
+      const modelConfigs = [
+        {
+          url: "./public/亚古兽.glb",
+          name: "亚古兽",
+          property: "agumonModel",
+          priority: true,
+        },
+        {
+          url: "./public/暴龙兽.glb",
+          name: "暴龙兽",
+          property: "greymonModel",
+          priority: false,
+        },
+        {
+          url: "./public/机械暴龙兽.glb",
+          name: "机械暴龙兽",
+          property: "metalGreymonModel",
+          priority: false,
+        },
+        {
+          url: "./public/战斗暴龙兽.glb",
+          name: "战斗暴龙兽",
+          property: "wargreymonModel",
+          priority: false,
+        },
+      ];
 
-      // 加载亚古兽
-      const agumonData = await new Promise((resolve, reject) => {
-        loader.load(
-          "./public/亚古兽.glb",
-          (gltf) => resolve(gltf),
+      // 跟踪总体加载进度
+      let totalLoaded = 0;
+      let totalSize = 0;
+      const modelProgress = {};
+
+      // 更新总体进度显示
+      const updateOverallProgress = () => {
+        const percent =
+          totalSize > 0 ? Math.floor((totalLoaded / totalSize) * 100) : 0;
+        const loadedMB = (totalLoaded / 1024 / 1024).toFixed(1);
+        const totalMB = (totalSize / 1024 / 1024).toFixed(1);
+        statusEl.textContent = `加载进度: ${percent}% (${loadedMB}MB / ${totalMB}MB)`;
+      };
+
+      // 先加载优先级模型（亚古兽）
+      const priorityModel = modelConfigs.find((m) => m.priority);
+      if (priorityModel) {
+        statusEl.textContent = `正在加载${priorityModel.name}...`;
+        const data = await this.loadModelWithCache(
+          priorityModel.url,
+          priorityModel.name,
+          loader,
+          true,
           (progress) => {
-            const percent = ((progress.loaded / progress.total) * 100).toFixed(
+            if (progress.fromCache) {
+              statusEl.textContent = `从缓存加载${priorityModel.name}...`;
+            } else {
+              if (!modelProgress[priorityModel.name]) {
+                modelProgress[priorityModel.name] = {
+                  loaded: 0,
+                  total: progress.total || 0,
+                };
+                totalSize += progress.total || 0;
+              }
+              modelProgress[priorityModel.name].loaded = progress.loaded;
+              totalLoaded = Object.values(modelProgress).reduce(
+                (sum, p) => sum + p.loaded,
+                0
+              );
+              const percent =
+                progress.total > 0
+                  ? Math.floor((progress.loaded / progress.total) * 100)
+                  : 0;
+              statusEl.textContent = `加载${priorityModel.name}: ${percent}%`;
+            }
+          }
+        );
+        this[priorityModel.property] = this.setupModel(data.scene, true);
+        this.scene.add(this[priorityModel.property]);
+        this.currentModel = this[priorityModel.property];
+
+        // 启动动画循环（让用户看到亚古兽）
+        this.animate();
+      }
+
+      // 并行加载其他模型
+      statusEl.textContent = `正在并行加载其他模型...`;
+
+      const loadPromises = modelConfigs
+        .filter((m) => !m.priority)
+        .map(async (config) => {
+          try {
+            const data = await this.loadModelWithCache(
+              config.url,
+              config.name,
+              loader,
+              false,
+              (progress) => {
+                if (progress.fromCache) {
+                  // 缓存加载，快速完成
+                  if (!modelProgress[config.name]) {
+                    modelProgress[config.name] = { loaded: 0, total: 0 };
+                  }
+                } else {
+                  if (!modelProgress[config.name]) {
+                    modelProgress[config.name] = {
+                      loaded: 0,
+                      total: progress.total || 0,
+                    };
+                    totalSize += progress.total || 0;
+                  }
+                  modelProgress[config.name].loaded = progress.loaded;
+                  totalLoaded = Object.values(modelProgress).reduce(
+                    (sum, p) => sum + p.loaded,
+                    0
+                  );
+                  updateOverallProgress();
+                }
+              }
+            );
+            this[config.property] = this.setupModel(data.scene, false);
+            this.scene.add(this[config.property]);
+
+            // 更新进度
+            if (modelProgress[config.name]) {
+              modelProgress[config.name].loaded =
+                modelProgress[config.name].total;
+            }
+            totalLoaded = Object.values(modelProgress).reduce(
+              (sum, p) => sum + p.loaded,
               0
             );
-            statusEl.textContent = `加载亚古兽: ${percent}%`;
-          },
-          (error) => reject(error)
-        );
-      });
+            updateOverallProgress();
 
-      this.agumonModel = agumonData.scene;
-      this.agumonModel.scale.set(1, 1, 1);
-      this.agumonModel.position.set(0, 0, 0);
-      this.agumonModel.traverse((child) => {
-        if (child.isMesh) {
-          child.castShadow = true;
-          child.receiveShadow = true;
-        }
-      });
+            return { success: true, name: config.name };
+          } catch (error) {
+            console.error(`加载${config.name}失败:`, error);
+            return { success: false, name: config.name, error };
+          }
+        });
 
-      statusEl.textContent = "正在加载战斗暴龙兽...";
+      // 等待所有模型加载完成
+      const results = await Promise.all(loadPromises);
 
-      // 加载战斗暴龙兽
-      const wargreymonData = await new Promise((resolve, reject) => {
-        loader.load(
-          "./public/战斗暴龙兽.glb",
-          (gltf) => resolve(gltf),
-          (progress) => {
-            const percent = ((progress.loaded / progress.total) * 100).toFixed(
-              0
-            );
-            statusEl.textContent = `加载战斗暴龙兽: ${percent}%`;
-          },
-          (error) => reject(error)
-        );
-      });
+      // 检查是否有加载失败的模型
+      const failed = results.filter((r) => !r.success);
+      if (failed.length > 0) {
+        console.warn("部分模型加载失败:", failed);
+      }
 
-      this.wargreymonModel = wargreymonData.scene;
-      this.wargreymonModel.scale.set(1, 1, 1);
-      this.wargreymonModel.position.set(0, 0, 0);
-      this.wargreymonModel.visible = false; // 初始隐藏
-      this.wargreymonModel.traverse((child) => {
-        if (child.isMesh) {
-          child.castShadow = true;
-          child.receiveShadow = true;
-        }
-      });
-
-      // 添加到场景
-      this.scene.add(this.agumonModel);
-      this.scene.add(this.wargreymonModel);
-      this.currentModel = this.agumonModel;
-
-      statusEl.textContent = '加载完成！点击"开始进化"按钮';
+      statusEl.textContent = "加载完成！";
       document.getElementById("evolveBtn").disabled = false;
 
-      this.animate();
+      // 2秒后自动隐藏加载完成提示
+      setTimeout(() => {
+        statusEl.textContent = "";
+      }, 2000);
     } catch (error) {
       console.error("加载模型失败:", error);
       statusEl.textContent = "加载失败: " + error.message;
@@ -287,7 +600,14 @@ class DigimonEvolution {
   }
 
   async evolve() {
-    if (this.isEvolving || !this.agumonModel || !this.wargreymonModel) return;
+    if (
+      this.isEvolving ||
+      !this.agumonModel ||
+      !this.greymonModel ||
+      !this.metalGreymonModel ||
+      !this.wargreymonModel
+    )
+      return;
 
     this.isEvolving = true;
     const statusEl = document.getElementById("status");
@@ -299,18 +619,52 @@ class DigimonEvolution {
     overlay.className = "evolution-overlay active";
     document.body.appendChild(overlay);
 
-    // 完整的进化流程
+    // 第一阶段：亚古兽 → 暴龙兽
     statusEl.textContent = "⚡ 进化开始！能量聚集中...";
     await this.phase1_EnergyGathering(); // 能量聚集阶段
 
     statusEl.textContent = "💫 数据流启动！亚古兽 → 暴龙兽";
     await this.phase2_DataStream(); // 数据流阶段
 
-    statusEl.textContent = "🔥 能量爆发！暴龙兽 → 机械暴龙兽";
+    statusEl.textContent = "✨ 形态转换！暴龙兽显现！";
+    await this.phase4_FormTransformation(0, 1); // 切换到暴龙兽
+    this.evolutionLevel = 1;
+
+    statusEl.textContent = "🌟 暴龙兽！";
+    await this.phase5_NewFormAppear(); // 新形态显现阶段
+    await this.phase6_FinalShowcase(); // 短暂展示
+
+    // 第二阶段：暴龙兽 → 机械暴龙兽
+    statusEl.textContent = "⚡ 继续进化！能量再次聚集...";
+    await this.phase1_EnergyGathering(); // 能量聚集阶段
+
+    statusEl.textContent = "💫 数据流加速！暴龙兽 → 机械暴龙兽";
+    await this.phase2_DataStream(); // 数据流阶段
+
+    statusEl.textContent = "🔥 能量爆发！机械暴龙兽显现！";
     await this.phase3_EnergyBurst(); // 能量爆发阶段
 
-    statusEl.textContent = "✨ 形态重组！机械暴龙兽 → 战斗暴龙兽";
-    await this.phase4_FormTransformation(); // 形态转换阶段
+    statusEl.textContent = "✨ 形态转换！机械暴龙兽！";
+    await this.phase4_FormTransformation(1, 2); // 切换到机械暴龙兽
+    this.evolutionLevel = 2;
+
+    statusEl.textContent = "🌟 机械暴龙兽！";
+    await this.phase5_NewFormAppear(); // 新形态显现阶段
+    await this.phase6_FinalShowcase(); // 短暂展示
+
+    // 第三阶段：机械暴龙兽 → 战斗暴龙兽
+    statusEl.textContent = "⚡ 最终进化！能量极限聚集...";
+    await this.phase1_EnergyGathering(); // 能量聚集阶段
+
+    statusEl.textContent = "💫 数据流极限！机械暴龙兽 → 战斗暴龙兽";
+    await this.phase2_DataStream(); // 数据流阶段
+
+    statusEl.textContent = "🔥 终极能量爆发！";
+    await this.phase3_EnergyBurst(); // 能量爆发阶段
+
+    statusEl.textContent = "✨ 最终形态重组！战斗暴龙兽！";
+    await this.phase4_FormTransformation(2, 3); // 切换到战斗暴龙兽
+    this.evolutionLevel = 3;
 
     statusEl.textContent = "🌟 新形态显现！战斗暴龙兽！";
     await this.phase5_NewFormAppear(); // 新形态显现阶段
@@ -338,9 +692,9 @@ class DigimonEvolution {
         const progress = Math.min(elapsed / duration, 1);
         const easeProgress = this.easeInOutQuad(progress);
 
-        // 亚古兽缓慢旋转
-        this.currentModel.rotation.y =
-          startRotation + easeProgress * Math.PI * 0.5;
+        // 模型逐渐加速旋转（准备龙卷风效果）
+        const rotationSpeed = 0.02 + easeProgress * 0.08; // 从慢到快
+        this.currentModel.rotation.y += rotationSpeed;
 
         // 光效逐渐增强
         this.lights.forEach((light, index) => {
@@ -377,7 +731,7 @@ class DigimonEvolution {
     });
   }
 
-  // 阶段2: 数据流 - 螺旋上升的数据流效果
+  // 阶段2: 数据流 - 龙卷风效果，数据流围绕模型快速旋转
   async phase2_DataStream() {
     return new Promise((resolve) => {
       const duration = 3000; // 3秒
@@ -388,31 +742,55 @@ class DigimonEvolution {
         const progress = Math.min(elapsed / duration, 1);
         const easeProgress = this.easeInOutQuad(progress);
 
-        // 数据流显现并旋转上升
-        this.dataStreams.material.opacity = easeProgress * 0.8;
+        // 数据流显现并增强
+        this.dataStreams.material.opacity = easeProgress * 0.9;
 
         const positions = this.dataStreams.geometry.attributes.position.array;
         const speeds = this.dataStreams.geometry.userData.speeds;
         const radii = this.dataStreams.geometry.userData.radii;
         const angles = this.dataStreams.geometry.userData.angles;
+        const heights = this.dataStreams.geometry.userData.heights;
+        const verticalSpeeds =
+          this.dataStreams.geometry.userData.verticalSpeeds;
+        const rotationSpeeds =
+          this.dataStreams.geometry.userData.rotationSpeeds;
+
+        // 龙卷风旋转速度（随进度加速）
+        const tornadoSpeed = 1 + easeProgress * 3; // 从1倍速到4倍速
 
         for (let i = 0; i < positions.length; i += 3) {
           const idx = i / 3;
-          // 螺旋上升
-          angles[idx] += speeds[idx] * (1 + easeProgress * 2);
-          const radius = radii[idx] * (1 - easeProgress * 0.3);
 
+          // 快速旋转（龙卷风效果）
+          angles[idx] += rotationSpeeds[idx] * tornadoSpeed;
+
+          // 向中心收缩（形成龙卷风形状）
+          const targetRadius = radii[idx] * (0.3 + easeProgress * 0.2); // 逐渐收缩
+          const currentRadius = radii[idx] * (1 - easeProgress * 0.5);
+          const radius = Math.max(targetRadius, currentRadius);
+
+          // 垂直上升
+          heights[idx] =
+            (heights[idx] + verticalSpeeds[idx] * tornadoSpeed) % 10;
+          if (heights[idx] < -2) heights[idx] += 10; // 循环到底部
+
+          // 更新位置（围绕模型中心旋转）
           positions[i] = Math.cos(angles[idx]) * radius;
-          positions[i + 1] = (positions[i + 1] + speeds[idx] * 2) % 8;
+          positions[i + 1] = -2 + heights[idx];
           positions[i + 2] = Math.sin(angles[idx]) * radius;
         }
         this.dataStreams.geometry.attributes.position.needsUpdate = true;
-        this.dataStreams.rotation.y += 0.01;
 
-        // 亚古兽继续旋转，光效增强
-        this.currentModel.rotation.y += 0.02;
+        // 模型快速旋转（龙卷风中心）
+        this.currentModel.rotation.y += 0.15 * tornadoSpeed; // 快速旋转
+
+        // 光效增强
         this.lights.forEach((light) => {
-          light.intensity = 3 + easeProgress * 3;
+          light.intensity = 3 + easeProgress * 4;
+          // 光效也围绕模型旋转
+          const lightAngle = Date.now() * 0.002 * tornadoSpeed;
+          light.position.x = Math.cos(lightAngle) * 3;
+          light.position.z = Math.sin(lightAngle) * 3;
         });
 
         // 相机继续拉近
@@ -429,7 +807,7 @@ class DigimonEvolution {
     });
   }
 
-  // 阶段3: 能量爆发 - 强烈的光效爆发，模拟中间形态
+  // 阶段3: 能量爆发 - 强烈的光效爆发，龙卷风效果达到峰值
   async phase3_EnergyBurst() {
     return new Promise((resolve) => {
       const duration = 2000; // 2秒
@@ -441,31 +819,51 @@ class DigimonEvolution {
 
         // 强烈的光效闪烁
         const flashIntensity = 6 + Math.sin(progress * Math.PI * 8) * 3;
-        this.lights.forEach((light) => {
+        this.lights.forEach((light, index) => {
           light.intensity = flashIntensity;
           light.color.setHSL(0.1 + progress * 0.3, 1, 0.5);
+          // 光效快速旋转
+          const lightAngle = Date.now() * 0.005 + index * Math.PI;
+          light.position.x = Math.cos(lightAngle) * 3;
+          light.position.z = Math.sin(lightAngle) * 3;
         });
 
-        // 数据流加速
+        // 数据流加速旋转（龙卷风效果达到峰值）
         const positions = this.dataStreams.geometry.attributes.position.array;
         const speeds = this.dataStreams.geometry.userData.speeds;
         const angles = this.dataStreams.geometry.userData.angles;
         const radii = this.dataStreams.geometry.userData.radii;
+        const heights = this.dataStreams.geometry.userData.heights;
+        const verticalSpeeds =
+          this.dataStreams.geometry.userData.verticalSpeeds;
+        const rotationSpeeds =
+          this.dataStreams.geometry.userData.rotationSpeeds;
+
+        // 龙卷风速度达到峰值（5-8倍速）
+        const tornadoSpeed = 5 + progress * 3;
 
         for (let i = 0; i < positions.length; i += 3) {
           const idx = i / 3;
-          angles[idx] += speeds[idx] * 5;
-          const radius = radii[idx] * (0.7 - progress * 0.4);
+          // 极速旋转
+          angles[idx] += rotationSpeeds[idx] * tornadoSpeed;
+          // 向中心收缩
+          const radius = radii[idx] * (0.2 + progress * 0.1);
+
+          // 快速上升
+          heights[idx] =
+            (heights[idx] + verticalSpeeds[idx] * tornadoSpeed * 2) % 10;
+          if (heights[idx] < -2) heights[idx] += 10;
+
           positions[i] = Math.cos(angles[idx]) * radius;
-          positions[i + 1] = (positions[i + 1] + speeds[idx] * 5) % 8;
+          positions[i + 1] = -2 + heights[idx];
           positions[i + 2] = Math.sin(angles[idx]) * radius;
         }
         this.dataStreams.geometry.attributes.position.needsUpdate = true;
 
-        // 亚古兽缩放和旋转
+        // 模型极速旋转（龙卷风中心）
         const scale = 1 + Math.sin(progress * Math.PI * 4) * 0.3;
         this.currentModel.scale.set(scale, scale, scale);
-        this.currentModel.rotation.y += 0.05;
+        this.currentModel.rotation.y += 0.3 * tornadoSpeed; // 极速旋转
 
         // 相机震动效果
         this.camera.position.x = Math.sin(progress * Math.PI * 10) * 0.1;
@@ -483,17 +881,28 @@ class DigimonEvolution {
   }
 
   // 阶段4: 形态转换 - 数据重组，模型切换
-  async phase4_FormTransformation() {
+  // fromLevel: 当前进化等级, toLevel: 目标进化等级
+  async phase4_FormTransformation(fromLevel, toLevel) {
     return new Promise((resolve) => {
       const duration = 1500; // 1.5秒
       const startTime = Date.now();
+
+      // 获取目标模型
+      const modelMap = [
+        this.agumonModel,
+        this.greymonModel,
+        this.metalGreymonModel,
+        this.wargreymonModel,
+      ];
+      const targetModel = modelMap[toLevel];
 
       const animate = () => {
         const elapsed = Date.now() - startTime;
         const progress = Math.min(elapsed / duration, 1);
         const easeProgress = this.easeInOutQuad(progress);
 
-        // 亚古兽淡出
+        // 当前模型淡出并继续旋转
+        this.currentModel.rotation.y += 0.1 * (1 - easeProgress); // 旋转速度逐渐减慢
         this.currentModel.traverse((child) => {
           if (child.isMesh && child.material) {
             if (Array.isArray(child.material)) {
@@ -510,16 +919,28 @@ class DigimonEvolution {
           }
         });
 
-        // 数据流向中心收缩
+        // 数据流向中心收缩（龙卷风效果减弱）
         const positions = this.dataStreams.geometry.attributes.position.array;
         const radii = this.dataStreams.geometry.userData.radii;
+        const angles = this.dataStreams.geometry.userData.angles;
+        const heights = this.dataStreams.geometry.userData.heights;
+        const rotationSpeeds =
+          this.dataStreams.geometry.userData.rotationSpeeds;
+
+        // 旋转速度逐渐减慢
+        const tornadoSpeed = 1 - easeProgress * 0.7;
+
         for (let i = 0; i < positions.length; i += 3) {
           const idx = i / 3;
-          const targetRadius = radii[idx] * (1 - easeProgress);
-          const angle = Math.atan2(positions[i + 2], positions[i]);
+          // 继续旋转但速度减慢
+          angles[idx] += rotationSpeeds[idx] * tornadoSpeed;
+          // 向中心收缩
+          const targetRadius = radii[idx] * (0.2 + easeProgress * 0.1);
+          const angle = angles[idx];
+
           positions[i] = Math.cos(angle) * targetRadius;
           positions[i + 2] = Math.sin(angle) * targetRadius;
-          positions[i + 1] = 1 + (positions[i + 1] - 1) * (1 - easeProgress);
+          positions[i + 1] = -2 + heights[idx] * (1 - easeProgress * 0.5);
         }
         this.dataStreams.geometry.attributes.position.needsUpdate = true;
         this.dataStreams.material.opacity = 0.8 * (1 - easeProgress);
@@ -534,10 +955,30 @@ class DigimonEvolution {
         } else {
           // 切换模型
           this.currentModel.visible = false;
-          this.currentModel = this.wargreymonModel;
+          this.currentModel = targetModel;
           this.currentModel.visible = true;
-          this.currentModel.scale.set(0.3, 0.3, 0.3);
-          this.currentModel.rotation.y = 0;
+          // 根据进化等级设置初始缩放（亚古兽为1.0，其他形态从0.3开始放大）
+          const initialScale = toLevel === 0 ? 1.0 : 0.3;
+          this.currentModel.scale.set(initialScale, initialScale, initialScale);
+          // 新模型从当前旋转角度开始（保持旋转连续性）
+          this.currentModel.rotation.y = this.currentModel.rotation.y || 0;
+
+          // 设置初始透明度为0（将在phase5中淡入）
+          this.currentModel.traverse((child) => {
+            if (child.isMesh && child.material) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach((mat) => {
+                  if (mat.transparent !== undefined) {
+                    mat.transparent = true;
+                    mat.opacity = 0;
+                  }
+                });
+              } else {
+                child.material.transparent = true;
+                child.material.opacity = 0;
+              }
+            }
+          });
 
           // 重置数据流
           this.resetDataStreams();
@@ -548,20 +989,29 @@ class DigimonEvolution {
     });
   }
 
-  // 阶段5: 新形态显现 - 战斗暴龙兽从光中显现
+  // 阶段5: 新形态显现 - 新形态从光中显现
   async phase5_NewFormAppear() {
     return new Promise((resolve) => {
       const duration = 2500; // 2.5秒
       const startTime = Date.now();
+
+      // 根据进化等级确定目标缩放
+      const targetScales = [1.0, 1.0, 1.0, 1.0]; // 所有形态最终都缩放到1.0
+      const currentScale = this.currentModel.scale.x;
+      const targetScale = targetScales[this.evolutionLevel] || 1.0;
+      const scaleRange = targetScale - currentScale;
 
       const animate = () => {
         const elapsed = Date.now() - startTime;
         const progress = Math.min(elapsed / duration, 1);
         const easeProgress = this.easeOutCubic(progress);
 
-        // 战斗暴龙兽缩放出现
-        const scale = 0.3 + easeProgress * 0.7;
+        // 新形态缩放出现并旋转
+        const scale = currentScale + easeProgress * scaleRange;
         this.currentModel.scale.set(scale, scale, scale);
+        // 模型继续旋转（从慢到快）
+        const rotationSpeed = 0.05 + easeProgress * 0.1;
+        this.currentModel.rotation.y += rotationSpeed;
 
         // 淡入
         this.currentModel.traverse((child) => {
@@ -675,18 +1125,23 @@ class DigimonEvolution {
     const positions = this.dataStreams.geometry.attributes.position.array;
     const radii = this.dataStreams.geometry.userData.radii;
     const angles = this.dataStreams.geometry.userData.angles;
+    const heights = this.dataStreams.geometry.userData.heights;
 
     for (let i = 0; i < positions.length; i += 3) {
       const idx = i / 3;
-      const radius = radii[idx];
+      const heightRatio = Math.random();
+      const baseRadius = 4;
+      const topRadius = 0.5;
+      const radius = baseRadius - (baseRadius - topRadius) * heightRatio;
       const angle = Math.random() * Math.PI * 2;
-      const height = Math.random() * 8;
+      const height = -2 + heightRatio * 10;
 
       positions[i] = Math.cos(angle) * radius;
       positions[i + 1] = height;
       positions[i + 2] = Math.sin(angle) * radius;
 
       angles[idx] = angle;
+      heights[idx] = height;
     }
     this.dataStreams.geometry.attributes.position.needsUpdate = true;
   }
@@ -701,10 +1156,21 @@ class DigimonEvolution {
     this.currentModel.scale.set(1, 1, 1);
     this.currentModel.rotation.y = 0;
 
-    // 重置战斗暴龙兽
+    // 重置所有其他模型
+    this.greymonModel.visible = false;
+    this.greymonModel.scale.set(1, 1, 1);
+    this.greymonModel.rotation.y = 0;
+
+    this.metalGreymonModel.visible = false;
+    this.metalGreymonModel.scale.set(1, 1, 1);
+    this.metalGreymonModel.rotation.y = 0;
+
     this.wargreymonModel.visible = false;
     this.wargreymonModel.scale.set(1, 1, 1);
     this.wargreymonModel.rotation.y = 0;
+
+    // 重置进化等级
+    this.evolutionLevel = 0;
 
     // 重置相机
     this.camera.position.set(0, 2, 8);
@@ -730,19 +1196,27 @@ class DigimonEvolution {
     this.dataStreams.material.opacity = 0;
     this.resetDataStreams();
 
-    // 恢复材质
-    this.agumonModel.traverse((child) => {
-      if (child.isMesh && child.material) {
-        if (Array.isArray(child.material)) {
-          child.material.forEach((mat) => {
-            if (mat.transparent !== undefined) {
-              mat.opacity = 1;
-            }
-          });
-        } else {
-          child.material.opacity = 1;
+    // 恢复所有模型的材质
+    const allModels = [
+      this.agumonModel,
+      this.greymonModel,
+      this.metalGreymonModel,
+      this.wargreymonModel,
+    ];
+    allModels.forEach((model) => {
+      model.traverse((child) => {
+        if (child.isMesh && child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach((mat) => {
+              if (mat.transparent !== undefined) {
+                mat.opacity = 1;
+              }
+            });
+          } else {
+            child.material.opacity = 1;
+          }
         }
-      }
+      });
     });
 
     document.getElementById("status").textContent =

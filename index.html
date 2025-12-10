@@ -3,13 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>数码宝贝进化 - 亚古兽 → 战斗暴龙兽</title>
+    <title>数码宝贝进化 - 亚古兽 → 暴龙兽 → 机械暴龙兽 → 战斗暴龙兽</title>
     <link rel="stylesheet" href="style.css">
+    <!-- 预加载关键资源 -->
+    <link rel="preload" href="./public/亚古兽.glb" as="fetch" crossorigin="anonymous">
+    <link rel="prefetch" href="./public/暴龙兽.glb" as="fetch" crossorigin="anonymous">
+    <link rel="prefetch" href="./public/机械暴龙兽.glb" as="fetch" crossorigin="anonymous">
+    <link rel="prefetch" href="./public/战斗暴龙兽.glb" as="fetch" crossorigin="anonymous">
 </head>
 <body>
     <div id="container">
         <div id="ui">
-            <h1>数码宝贝进化</h1>
             <div id="info">
                 <p id="status">准备就绪</p>
             </div>
